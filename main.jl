@@ -1,7 +1,5 @@
 # main.jl
 using SymbolicRegression
-using DynamicExpressions # 微分機能(eval_grad_tree_array)を確実に使うため追加
-using Zygote  
 
 # ==========================================
 # 1. データ生成関数
@@ -21,30 +19,36 @@ end
 # ==========================================
 function action_loss(tree, dataset::Dataset{T,L}, options)::L where {T,L}
     # ① 候補関数 f(x) の評価
-    local f_x
-    try
-        f_result = eval_tree_array(tree, dataset.X, options)
-        f_x = f_result[1] # 1つ目は確実に計算値
-        
-        # フラグを使わず、計算結果に異常値(NaNやInf)が無いかを直接確認する
-        if f_x === nothing || any(x -> !isfinite(x), f_x)
-            return L(Inf)
-        end
-    catch
+    f_res = eval_tree_array(tree, dataset.X, options)
+    f_x = f_res[1]
+    
+    if f_x === nothing || any(x -> !isfinite(x), f_x)
         return L(Inf)
     end
     
-    # ② 微分 f'(x) の評価
-    local df_dx
-    try
-        grad_result = eval_grad_tree_array(tree, dataset.X, options; variable=true)
-        grads = grad_result[1] # 1つ目は確実に勾配(Gradient)
-        
-        if grads === nothing || any(x -> !isfinite(x), grads)
-            return L(Inf)
-        end
-        df_dx = grads[1, :] # xに関する微分を取り出す
-    catch
+    # ② 微分 f'(x) を「数値微分 (Finite Difference)」で計算する！
+    # （Zygoteによる自動微分の衝突バグを完全に回避します）
+    dx = 1e-4
+    
+    # x座標（1行目）だけを微小に動かしたデータを作る
+    X_plus = copy(dataset.X)
+    X_plus[1, :] .+= dx
+    
+    X_minus = copy(dataset.X)
+    X_minus[1, :] .-= dx
+    
+    # 微小に動かした位置での f(x) を計算
+    f_plus_res = eval_tree_array(tree, X_plus, options)
+    f_minus_res = eval_tree_array(tree, X_minus, options)
+    
+    if f_plus_res[1] === nothing || f_minus_res[1] === nothing
+        return L(Inf)
+    end
+    
+    # 傾きを計算
+    df_dx = (f_plus_res[1] .- f_minus_res[1]) ./ (2.0 * dx)
+    
+    if any(x -> !isfinite(x), df_dx)
         return L(Inf)
     end
     
@@ -54,7 +58,7 @@ function action_loss(tree, dataset::Dataset{T,L}, options)::L where {T,L}
     # ③ 変換後の作用
     L_pred_base = 0.5 .* (df_dx .* v).^2 .- 0.5 .* f_x.^2
     
-    # ④ 定数のズレ(C)を自動で吸収して、誤差(MSE)を計算する
+    # ④ 定数のズレ(C)を自動で吸収して誤差を計算
     C = sum(L_target .- L_pred_base) / length(L_target)
     L_pred = L_pred_base .+ C
     
@@ -66,23 +70,24 @@ function action_loss(tree, dataset::Dataset{T,L}, options)::L where {T,L}
     
     return mse_loss
 end
+
 # ==========================================
 # 3. 探索実行関数
 # ==========================================
-function run_search(X_train, L_data; niterations=40) # ← 探索回数を少し増やして定数を3.0まで合わせる時間を与えます
+function run_search(X_train, L_data; niterations=40)
     options = Options(
-        binary_operators=[+, -, *, /],# ^, # ← べき乗は今回の系ではカオスの原因になるので一旦封印！
-        # unary_operators=[sin, cos, exp, sinh], # ← 今回の系ではカオスの原因になるので一旦封印！
+        binary_operators=[+, -, *, /],
         loss_function=action_loss,
         npopulations=30,
         parsimony=0.01,
-        verbosity=1,      # ← これを0にすると、毎回の進行ログが消えて静かになります
-        progress=true     # ← これをtrueにすると、下部にプログレスバーだけが表示されます
+        verbosity=1,      # 1にすることでエラー回避しつつ静かにする
+        progress=true     # バーだけをスマートに表示
     )
     
     hof = EquationSearch(X_train, L_data, options=options, niterations=niterations)
     return hof
 end
+
 # ==========================================
 # 4. 実行ブロック
 # ==========================================
@@ -91,8 +96,8 @@ if !@isdefined(IS_TESTING)
     X_train, L_data = generate_data(200)
     
     println("うまい変数変換の探索を開始します...")
-    global hof_result = run_search(X_train, L_data, niterations=10)
+    global hof_result = run_search(X_train, L_data, niterations=40)
     
-    println("探索が完了しました！")
-    hof_result 
+    println("\n探索が完了しました！")
+    display(hof_result) 
 end
