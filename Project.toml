@@ -1,2 +1,13 @@
+name = "MyPackage"
+uuid = "f1323546-895f-4bda-ba1e-1a994e7bd5f1"
+version = "0.1.0"
+authors = ["daisuke_kogure <kogure.d.816@ms.saitama-u.ac.jp>"]
+
 [deps]
 SymbolicRegression = "8254be44-1295-4e6a-a16d-46603ac705cb"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

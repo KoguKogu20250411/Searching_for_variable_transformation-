@@ -1,76 +1,103 @@
-using Pkg
-# Pkg.add("SymbolicRegression")
-
 using SymbolicRegression
-using Test
 
-# 1. 物理タスクのための演算子定義
-# 記号回帰の探索空間（基底関数）を定義します。
-sq(x) = x^2
+# --- 準備: 物理で使う独自の関数を定義 ---
+sq(x) = x^2  # 二乗関数
+
+# ==========================================
+# 1. データセットの作成 (真の物理系)
+# ==========================================
+println("データを生成しています...")
+N = 200
+x_data = rand(N) .* 10.0 .- 5.0
+v_data = rand(N) .* 10.0 .- 5.0
+
+# 観測されたラグランジアン: L = 1/2 v^2 - (1/2 x^2 - 3x)
+L_data = 0.5 .* v_data.^2 .- (0.5 .* x_data.^2 .- 3.0 .* x_data)
+
+# 特徴量行列を作成（1行目がx, 2行目がv）
+# 修正点: ' (Adjoint) ではなく、明示的に通常の行列(Matrix)に変換します
+X_train = Matrix(hcat(x_data, v_data)') 
+
+# ==========================================
+# 2. カスタム目的関数 (Loss) の定義
+# ==========================================
+function action_loss(tree, dataset::Dataset{T,L}, options)::L where {T,L}
+    
+    # ① 候補の数式 f(x) にデータ x を入れて計算する
+    # 修正点: eval_tree_array は最新版では (値の配列, フラグ) を返しますが、
+    # 失敗した場合はエラーをキャッチする方が確実です。
+    local f_x, grads
+    try
+        # 評価を実行 (ここでは f_x と flag のタプルが返る想定ですが、仕様変更に備えて全体を取得)
+        eval_result = eval_tree_array(tree, dataset.X, options)
+        
+        # 成功したかどうかの判定 (フラグが配列の場合は all を使う、あるいは単一のBoolならそのまま)
+        if typeof(eval_result[2]) <: AbstractArray
+            if !all(eval_result[2])
+                return L(Inf)
+            end
+        elseif !eval_result[2]
+             return L(Inf)
+        end
+        f_x = eval_result[1]
+        
+    catch e
+        return L(Inf) # ゼロ割りなどのエラーは無視する
+    end
+    
+    # ② 数式の微分 f'(x) を計算する
+    try
+        # gradient を取得
+        grad_result = eval_grad_tree_array(tree, dataset.X, options; variable=true)
+        
+        if typeof(grad_result[2]) <: AbstractArray
+            if !all(grad_result[2])
+                return L(Inf)
+            end
+        elseif !grad_result[2]
+             return L(Inf)
+        end
+        grads = grad_result[1]
+    catch e
+        return L(Inf)
+    end
+    
+    df_dx = grads[1, :] # 1つ目の変数 (x) に関する微分を抽出
+    
+    v = dataset.X[2, :] # 速度データ
+    L_target = dataset.y  # 正解のラグランジアンデータ
+    
+    # ③ 候補の変数変換によって予測されるラグランジアン
+    L_pred_base = 0.5 .* (df_dx .* v).^2 .- 0.5 .* f_x.^2
+    
+    # ④ 定数のズレ(C)を自動で吸収して、誤差(MSE)を計算する
+    C = sum(L_target .- L_pred_base) / length(L_target)
+    L_pred = L_pred_base .+ C
+    
+    mse_loss = sum((L_pred .- L_target).^2) / length(L_target)
+    
+    # NaNやInfが含まれている場合はInfを返す（安全対策）
+    if isnan(mse_loss) || isinf(mse_loss)
+        return L(Inf)
+    end
+    
+    return mse_loss
+end
+
+# ==========================================
+# 3. 探索の設定と実行
+# ==========================================
+println("うまい変数変換の探索を開始します...")
+
 options = Options(
     binary_operators=[+, -, *, /],
-    unary_operators=[sqrt, sq],
-    npopulations=20,     # 集団サイズ
-    niterations=10,      # 探索の深さ（実用時はより大きく設定）
-    parsimony=0.01       # 複雑な数式に対するペナルティ（オッカムの剃刀）
+    unary_operators=[sq], 
+    loss_function=action_loss, 
+    npopulations=30, 
+    parsimony=0.01   
 )
 
-# 2. データの生成（相対論的ダイナミクス）
-function generate_relativistic_data(n_samples::Int=100)
-    c_true = 3.0e8      # 光速
-    m_true = 1.0        # 静止質量
-    
-    # 0 から 0.99c までの速度データを生成
-    v = rand(n_samples) .* (0.99 * c_true)
-    c = fill(c_true, n_samples)
-    
-    # 入力特徴量: X = [v, c]
-    X = hcat(v, c)' 
-    
-    # 真の非線形運動量 (ターゲット)
-    # p = m * v * γ  --> γ = p / (m * v)
-    # ここでは、MLが「γ」という変数変換を抽出できるかを模すため、ターゲットをγとする
-    gamma_true = @. 1.0 / sqrt(1.0 - (v / c)^2)
-    
-    return X, gamma_true
-end
+# EquationSearchの実行
+hof = EquationSearch(X_train, L_data, options=options, niterations=10)
 
-# 3. ユニットテスト群
-@testset "Symbolic Regression: Variable Transformation Discovery" begin
-    
-    @testset "データ生成系の検証" begin
-        X, y = generate_relativistic_data(50)
-        @test size(X) == (2, 50)
-        @test length(y) == 50
-        @test all(y .>= 1.0) # ローレンツ因子は常に1以上であるべき
-    end
-    
-    @testset "探索アルゴリズムの稼働検証" begin
-        # ユニットテスト用にイテレーションを絞って実行
-        test_options = Options(
-            binary_operators=[+, -, *, /],
-            npopulations=5,
-            niterations=2
-        )
-        
-        # 自明な変数変換（単なる割り算）が発見できるかのテスト: z = x_1 / x_2
-        X_test = rand(2, 20)
-        y_test = X_test[1, :] ./ X_test[2, :]
-        
-        # 方程式の探索
-        hof = EquationSearch(X_test, y_test, options=test_options, runtests=false)
-        
-        # 実行がクラッシュせず、結果(Hall of Fame)が返却されることを確認
-        @test hof !== nothing
-    end
-end
-
-# 4. 実際の探索の実行（テスト外）
-println("--- 真の変数変換（ローレンツ因子）の探索を開始します ---")
-X_train, y_train = generate_relativistic_data(200)
-
-# 探索の実行 (実用レベル)
-# hall_of_fame_result = EquationSearch(X_train, y_train, options=options)
-# 
-# 期待される出力の例（最良の数式として以下のような形式が発見される）:
-# y = 1.0 / sqrt(1.0 - sq(x1 / x2))
+println("探索が完了しました！結果を確認してください。")
