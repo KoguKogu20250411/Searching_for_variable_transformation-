@@ -8,7 +8,7 @@ const IS_TESTING = true
 # 親ディレクトリにある main.jl を読み込む（上のフラグのおかげで探索は自動実行されない）
 include(joinpath(@__DIR__, "..", "main.jl"))
 
-@testset "Quadraticizability Variable Transformation" begin
+@testset "Polar Coordinate Variable Transformation" begin
     
     @testset "1. Data Generation Test" begin
         # N=50で正しく行列とベクトルが生成されるか

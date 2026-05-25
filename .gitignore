@@ -2,3 +2,5 @@
 Manifest.toml
 /notebook
 *.gif
+*.csv
+*.bak
