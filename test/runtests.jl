@@ -8,12 +8,12 @@ const IS_TESTING = true
 # 親ディレクトリにある main.jl を読み込む（上のフラグのおかげで探索は自動実行されない）
 include(joinpath(@__DIR__, "..", "main.jl"))
 
-@testset "Polar Coordinate Variable Transformation" begin
+@testset "Polar Coordinate Kinetic Term Discovery" begin
     
     @testset "1. Data Generation Test" begin
         # N=50で正しく行列とベクトルが生成されるか
         X, L = generate_data(50)
-        @test size(X) == (2, 50)
+        @test size(X) == (4, 50)
         @test length(L) == 50
         @test typeof(X) <: Matrix{Float64}
     end
