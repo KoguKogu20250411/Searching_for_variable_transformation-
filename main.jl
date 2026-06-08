@@ -25,7 +25,9 @@ end
 # ==========================================
 # タスクを受け取り、SymbolicRegression専用の loss_function を動的に生成します
 function make_loss_function(task::TransformationTask)
-    return function (tree, dataset::Dataset{T,L}, options)::L where {T,L}
+    
+    # 内部で明示的に名前付き関数を定義する（構文エラー回避のため）
+    function custom_loss(tree, dataset::Dataset{T,L}, options)::L where {T,L}
         # ① 候補となる変数変換 u = f(x) の評価
         f_res = eval_tree_array(tree, dataset.X, options)
         u_pred = f_res[1]
@@ -43,7 +45,7 @@ function make_loss_function(task::TransformationTask)
 
         LHS_target = dataset.y
         
-        # ③ 定数のズレ(C)を自動で吸収して誤差を計算（定数項を無視して形だけ合わせる場合）
+        # ③ 定数のズレ(C)を自動で吸収して誤差を計算
         C = sum(LHS_target .- RHS_pred_base) / length(LHS_target)
         RHS_pred = RHS_pred_base .+ C
         
@@ -52,6 +54,9 @@ function make_loss_function(task::TransformationTask)
 
         return isnan(mse_loss) || isinf(mse_loss) ? L(Inf) : mse_loss
     end
+
+    # 生成した関数（クロージャ）を返す
+    return custom_loss
 end
 
 # ==========================================
@@ -84,7 +89,7 @@ function run_transformation_search(task::TransformationTask; N::Int=200, niterat
     hof = EquationSearch(X_train, LHS_data, options=options, niterations=niterations)
     
     println("\n【探索完了】")
-    display(hof)
+    #display(hof)
     return hof
 end
 
@@ -107,4 +112,6 @@ if !@isdefined(IS_TESTING)
     )
 
     run_transformation_search(square_completion_task)
+
+    nothing # 長い出力を消す
 end
