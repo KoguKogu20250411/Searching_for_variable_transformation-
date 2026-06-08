@@ -2,139 +2,109 @@
 using SymbolicRegression
 
 # ==========================================
-# ★追加: 極座標の運動項を再発見する
+# 0. ユーザー定義の基底関数（必要に応じて追加）
 # ==========================================
 sq(x) = x^2
+safe_sqrt(x) = sqrt(abs(x))
+# 例: gaussian(x) = exp(-x^2) など
 
 # ==========================================
-# 1. データ生成関数
+# 1. 探索タスクの定義
 # ==========================================
-function generate_data(N::Int=200)
-    r_data = rand(N) .* 4.5 .+ 0.5
-    theta_data = rand(N) .* (2.0 * pi)
-    dr_data = rand(N) .* 4.0 .- 2.0
-    dtheta_data = rand(N) .* 4.0 .- 2.0
-
-    X_train = Matrix(hcat(r_data, theta_data, dr_data, dtheta_data)')
-
-    # 極座標の運動項: T = 1/2 (dr^2 + r^2 dtheta^2)
-    T_data = 0.5 .* (sq.(dr_data) .+ sq.(r_data .* dtheta_data))
-
-    return X_train, T_data
+struct TransformationTask
+    name::String
+    binary_operators::Vector{Function}
+    unary_operators::Vector{Function}
+    lhs_function::Function  # 変換前の関数 (Source: xを入れたらLHSの値を返す)
+    rhs_function::Function  # 変換後の関数 (Target: uを入れたらRHSの値を返す)
+    x_range::Tuple{Float64, Float64} # 探索する x の範囲
 end
 
 # ==========================================
-# 2. 目的関数 (極座標の運動項のスコア)
+# 2. 損失関数のジェネレータ
 # ==========================================
-function action_loss(tree, dataset::Dataset{T,L}, options)::L where {T,L}
-    # 候補関数 T(r, θ, ṙ, θ̇) の評価
-    f_res = eval_tree_array(tree, dataset.X, options)
-    f_x = f_res[1]
-    
-    if f_x === nothing || any(x -> !isfinite(x), f_x)
-        return L(Inf)
-    end
+# タスクを受け取り、SymbolicRegression専用の loss_function を動的に生成します
+function make_loss_function(task::TransformationTask)
+    return function (tree, dataset::Dataset{T,L}, options)::L where {T,L}
+        # ① 候補となる変数変換 u = f(x) の評価
+        f_res = eval_tree_array(tree, dataset.X, options)
+        u_pred = f_res[1]
 
-    target_T = dataset.y
+        if u_pred === nothing || any(x -> !isfinite(x), u_pred)
+            return L(Inf)
+        end
+        
+        # ② 右辺の関数に変換後の変数 u を代入して評価: RHS(u)
+        RHS_pred_base = task.rhs_function.(u_pred)
 
-    mse_loss = sum((f_x .- target_T).^2) / length(target_T)
-    
-    if isnan(mse_loss) || isinf(mse_loss)
-        return L(Inf)
+        if any(x -> !isfinite(x), RHS_pred_base)
+            return L(Inf)
+        end
+
+        LHS_target = dataset.y
+        
+        # ③ 定数のズレ(C)を自動で吸収して誤差を計算（定数項を無視して形だけ合わせる場合）
+        C = sum(LHS_target .- RHS_pred_base) / length(LHS_target)
+        RHS_pred = RHS_pred_base .+ C
+        
+        # ④ MSEの計算
+        mse_loss = sum((RHS_pred .- LHS_target).^2) / length(LHS_target)
+
+        return isnan(mse_loss) || isinf(mse_loss) ? L(Inf) : mse_loss
     end
-    
-    return mse_loss
 end
 
 # ==========================================
-# 3. 探索実行関数
+# 3. データ生成と探索の実行
 # ==========================================
-function run_search(X_train, L_data; niterations=100)
+function run_transformation_search(task::TransformationTask; N::Int=200, niterations=40)
+    println("【探索開始】 Task: ", task.name)
+    
+    # データの生成
+    low, high = task.x_range
+    x_data = rand(N) .* (high - low) .+ low
+    
+    # 左辺を正解データ (ターゲット) として計算
+    LHS_data = task.lhs_function.(x_data)
+    X_train = reshape(x_data, 1, N) # 1行N列のマトリックス
+    
+    # オプションの設定
     options = Options(
-        binary_operators=[+, -, *],
-        unary_operators=[sq],
-        loss_function=action_loss,
+        binary_operators=task.binary_operators,
+        unary_operators=task.unary_operators,
+        loss_function=make_loss_function(task),
         npopulations=30,
-        parsimony=0.1,
+        parsimony=0.01,
         verbosity=1,
         progress=true,
-        early_stop_condition = (loss, complexity) -> loss < 1e-18 && complexity <= 9
+        early_stop_condition = (loss, complexity) -> loss < 1e-10 && complexity < 7
     )
+
+    # 探索の実行
+    hof = EquationSearch(X_train, LHS_data, options=options, niterations=niterations)
     
-    hof = EquationSearch(X_train, L_data, options=options, niterations=niterations)
+    println("\n【探索完了】")
+    display(hof)
     return hof
 end
 
-function latest_hall_of_fame_path()
-    if !isdir("outputs")
-        return nothing
-    end
-
-    subdirs = filter(isdir, readdir("outputs"; join=true))
-    isempty(subdirs) && return nothing
-
-    latest_dir = argmax(path -> stat(path).mtime, subdirs)
-    csv_path = joinpath(latest_dir, "hall_of_fame.csv")
-    return isfile(csv_path) ? csv_path : nothing
-end
-
-function best_equation_from_hall_of_fame(csv_path::AbstractString)
-    best_loss = Inf
-    best_equation = ""
-
-    for line in Iterators.drop(eachline(csv_path), 1)
-        columns = split(line, ',', limit=3)
-        length(columns) < 3 && continue
-
-        loss = try
-            parse(Float64, columns[2])
-        catch
-            continue
-        end
-
-        equation = strip(replace(columns[3], '"' => ' '))
-
-        if loss < best_loss
-            best_loss = loss
-            best_equation = equation
-        end
-    end
-
-    return best_loss, best_equation
-end
-
-pretty_number(x::Real) = begin
-    rounded = round(Float64(x); digits=12)
-    if isapprox(rounded, round(rounded); atol=1e-12, rtol=0)
-        return string(Int(round(rounded)))
-    end
-    return string(rounded)
-end
-
-function normalize_equation_display(equation::AbstractString)
-    cleaned = replace(equation, r"\s+" => " ")
-    cleaned = replace(cleaned, "x4 * x1" => "x1 * x4")
-
-    return cleaned
-end
-
 # ==========================================
-# 4. 実行ブロック
+# 4. 実行ブロック (テスト)
 # ==========================================
 if !@isdefined(IS_TESTING)
-    println("データを生成しています...")
-    X_train, L_data = generate_data(200)
+    # 例: 前回の「平方完成」の問題を汎用フレームワークで解いてみる
+    # LHS: 0.5*x^2 - 3.0*x
+    # RHS: 0.5*u^2
+    # 期待される変換: u = x - 3
     
-    println("極座標の運動項の探索を開始します...")
-    global hof_result = run_search(X_train, L_data, niterations=40)
-    
-    println("\n探索が完了しました！")
-    csv_path = latest_hall_of_fame_path()
-    if csv_path !== nothing
-        best_loss, best_equation = best_equation_from_hall_of_fame(csv_path)
-        cleaned_equation = normalize_equation_display(best_equation)
-        println("整理後の最良式: ", cleaned_equation)
-        println("最良損失: ", best_loss)
-    end
-    # display(hof_result) 
+    square_completion_task = TransformationTask(
+        "平方完成の探索 (x^2 - 3x -> u^2)",
+        [+, -, *, /],          # 使用する二項演算子
+        [sq],                  # 使用する単項演算子 (基底関数)
+        x -> 0.5 * x^2 - 3.0 * x, # 左辺 LHS(x)
+        u -> 0.5 * u^2,           # 右辺 RHS(u)
+        (-5.0, 5.0)            # xの範囲
+    )
+
+    run_transformation_search(square_completion_task)
 end
