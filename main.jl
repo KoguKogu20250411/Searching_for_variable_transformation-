@@ -7,7 +7,6 @@ using SymbolicRegression
 sq(x) = x^2
 safe_sqrt(x) = sqrt(abs(x))
 
-# ホール・オブ・フェイム(HoF)から最良の木を抽出する関数
 function get_best_tree(hof)
     best_loss = Inf
     best_tree = nothing
@@ -47,7 +46,6 @@ struct MultiTransformationTask
     x_range::Tuple{Float64, Float64} 
 end
 
-# 損失関数ジェネレータ (多変数・交互最適化用)
 function make_loss_function(task::MultiTransformationTask, U_current::Matrix{Float64}, target_idx::Int)
     function custom_loss(tree, dataset::Dataset{T,L}, options)::L where {T,L}
         f_res = eval_tree_array(tree, dataset.X, options)
@@ -71,7 +69,6 @@ function make_loss_function(task::MultiTransformationTask, U_current::Matrix{Flo
     return custom_loss
 end
 
-# 実行関数 (多変数用)
 function run_multi_transformation_search(task::MultiTransformationTask; N::Int=200, niterations=20, max_rounds=2)
     println("\n=========================================")
     println("【探索開始】 ", task.name)
@@ -99,7 +96,7 @@ function run_multi_transformation_search(task::MultiTransformationTask; N::Int=2
                 unary_operators=task.unary_operators,
                 loss_function=make_loss_function(task, U_current, target_idx),
                 npopulations=30, parsimony=0.01,
-                verbosity=1,  # ★エラー修正済み
+                verbosity=1,
                 progress=true,
                 early_stop_condition = (loss, complexity) -> loss < 1e-10 && complexity < 7
             )
@@ -147,23 +144,30 @@ struct LagrangianTask
     v_range::Tuple{Float64, Float64}
 end
 
-# 損失関数ジェネレータ (ラグランジアン微分連鎖律用)
-function make_loss_function(task::LagrangianTask)
+# 修正箇所: AIは x(位置) しか知らない。速度 v はクロージャ(外部引数)として直接渡す。
+function make_loss_function(task::LagrangianTask, V_vel::Matrix{Float64})
     function custom_loss(tree, dataset::Dataset{T,L}, options)::L where {T,L}
-        X_pos = dataset.X[1:1, :] 
-        V_vel = dataset.X[2, :]
-
-        f_res = eval_tree_array(tree, X_pos, options)
+        # dataset.X には x のデータ (1次元) しか入っていない
+        f_res = eval_tree_array(tree, dataset.X, options)
         u_pred = f_res[1]
         if u_pred === nothing || any(x -> !isfinite(x), u_pred) return L(Inf) end
         
         dx = 1e-4
-        u_plus = eval_tree_array(tree, X_pos .+ dx, options)[1]
-        u_minus = eval_tree_array(tree, X_pos .- dx, options)[1]
+        
+        X_plus = copy(dataset.X)
+        X_plus[1, :] .+= dx
+        
+        X_minus = copy(dataset.X)
+        X_minus[1, :] .-= dx
+
+        u_plus = eval_tree_array(tree, X_plus, options)[1]
+        u_minus = eval_tree_array(tree, X_minus, options)[1]
         if u_plus === nothing || u_minus === nothing return L(Inf) end
 
         df_dx = (u_plus .- u_minus) ./ (2.0 * dx)
-        u_dot_pred = df_dx .* V_vel
+        
+        # 連鎖律 du/dt = (du/dx) * v (vは外部から持ち込んだ V_vel を使用)
+        u_dot_pred = df_dx .* V_vel[1, :]
         if any(x -> !isfinite(x), u_dot_pred) return L(Inf) end
 
         RHS_pred_base = task.rhs_function.(u_pred, u_dot_pred)
@@ -179,7 +183,6 @@ function make_loss_function(task::LagrangianTask)
     return custom_loss
 end
 
-# 実行関数 (ラグランジアン用)
 function run_lagrangian_search(task::LagrangianTask; N::Int=200, niterations=40)
     println("\n=========================================")
     println("【探索開始】 ", task.name)
@@ -190,20 +193,21 @@ function run_lagrangian_search(task::LagrangianTask; N::Int=200, niterations=40)
     X_pos = rand(1, N) .* (high_x - low_x) .+ low_x
     V_vel = rand(1, N) .* (high_v - low_v) .+ low_v
     
-    X_train = vcat(X_pos, V_vel)
-    LHS_data = Float64[task.lhs_function(X_train[1, i], X_train[2, i]) for i in 1:N]
+    # ターゲット値 (LHS_data) は x と v の両方から計算する
+    LHS_data = Float64[task.lhs_function(X_pos[1, i], V_vel[1, i]) for i in 1:N]
     
     options = Options(
         binary_operators=task.binary_operators,
         unary_operators=task.unary_operators,
-        loss_function=make_loss_function(task),
+        loss_function=make_loss_function(task, V_vel), # ここで速度を直接渡す！
         npopulations=30, parsimony=0.01,
         verbosity=1,
         progress=true,
         early_stop_condition = (loss, complexity) -> loss < 1e-10 && complexity < 7
     )
 
-    hof = EquationSearch(X_train, LHS_data, options=options, niterations=niterations)
+    # 修正箇所: AIには X_pos(位置) しか渡さない。これで確実に u(x) を探索する。
+    hof = EquationSearch(X_pos, LHS_data, options=options, niterations=niterations)
     
     println("\n【ラグランジアン探索完了！】")
     best_tree = get_best_tree(hof)
@@ -222,15 +226,15 @@ if !@isdefined(IS_TESTING)
         # ----------------------------------------------------
     # テストA: 1変数の最適化 (Coordinate Descent)
     # ----------------------------------------------------
-    multi_task = @make_multi_task(
-        1, 1,                                            # 入力1つ, 出力1つ
-        (x) -> 0.5 * (x^2 + 2.0*x + 1.0),                # LHS: 平方完成前
-        (u) -> 0.5 * (u^2),                               # RHS: 平方完成後
-        (-5.0, 5.0)                                      # 範囲
-    )
+    # multi_task = @make_multi_task(
+    #     1, 1,                                            # 入力1つ, 出力1つ
+    #     (x) -> 0.5 * (x^2 + 2.0*x + 1.0),                # LHS: 平方完成前
+    #     (u) -> 0.5 * (u^2),                               # RHS: 平方完成後
+    #     (-5.0, 5.0)                                      # 範囲
+    # )
     
-    # max_rounds=2 で u と v を2回ずつ交互に探索します
-    run_multi_transformation_search(multi_task, max_rounds=1, niterations=20)
+    # # max_rounds=1 で uを探索します
+    # run_multi_transformation_search(multi_task, max_rounds=1, niterations=20)
 
 
     # ----------------------------------------------------
@@ -250,14 +254,14 @@ if !@isdefined(IS_TESTING)
     # ----------------------------------------------------
     # テストC: ラグランジアン変換 (微分の連鎖律)
     # ----------------------------------------------------
-    # lagrangian_task = @make_lagrangian_task(
-    #     (x, v) -> 0.5 * v^2 - 0.5 * (x - 3.0)^2,         # LHS: 原点がズレた調和振動子
-    #     (u, u_dot) -> 0.5 * u_dot^2 - 0.5 * u^2,         # RHS: 綺麗な調和振動子
-    #     (-5.0, 5.0),                                     # 位置 x の範囲
-    #     (-5.0, 5.0)                                      # 速度 v の範囲
-    # )
+    lagrangian_task = @make_lagrangian_task(
+        (x, v) -> 0.5 * v^2 - 0.5 * (x - 3.0)^2,         # LHS: 原点がズレた調和振動子
+        (u, u_dot) -> 0.5 * u_dot^2 - 0.5 * u^2,         # RHS: 綺麗な調和振動子
+        (-5.0, 5.0),                                     # 位置 x の範囲
+        (-5.0, 5.0)                                      # 速度 v の範囲
+    )
 
-    # run_lagrangian_search(lagrangian_task, niterations=40)
+    run_lagrangian_search(lagrangian_task, niterations=40)
 
     # ----------------------------------------------------
     nothing # スクリプト末尾の不要な長文出力をミュート

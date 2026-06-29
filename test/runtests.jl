@@ -1,25 +1,24 @@
+# test/runtests.jl
 using Test
 using SymbolicRegression
 
 # main.jl 末尾のテスト実行ブロックが走らないようにフラグを立てる
 const IS_TESTING = true
 
-# テスト対象のファイルを読み込み (ディレクトリ構成に合わせてパスは適宜変更してください)
-include(joinpath(@__DIR__, "main.jl"))
+# 1つ上の階層（プロジェクト直下）の main.jl を読み込む
+include(joinpath(@__DIR__, "..", "main.jl"))
 
 @testset "SymbolicRegression Transformation Framework Tests" begin
     
     @testset "0. Utility Functions" begin
-        # 共通ユーティリティ関数の動作確認
         @test sq(4.0) == 16.0
         @test sq(-3.0) == 9.0
         
         @test safe_sqrt(9.0) == 3.0
-        @test safe_sqrt(-9.0) == 3.0 # abs(x) が正常に適用されているか
+        @test safe_sqrt(-9.0) == 3.0
     end
 
     @testset "1. MultiTransformationTask Definition" begin
-        # 多変数タスク構造体が正しく初期化され、クロージャが機能するか
         multi_task = MultiTransformationTask(
             "Test Multi Task",
             [+, -],
@@ -39,7 +38,6 @@ include(joinpath(@__DIR__, "main.jl"))
     end
 
     @testset "2. LagrangianTask Definition" begin
-        # ラグランジアンタスク構造体が正しく初期化され、クロージャが機能するか
         lag_task = LagrangianTask(
             "Test Lagrangian Task",
             [+, -, *, /],
@@ -58,9 +56,6 @@ include(joinpath(@__DIR__, "main.jl"))
     end
 
     @testset "3. Execution Pipeline (Smoke Tests)" begin
-        # CI/CD等で長時間ブロックされるのを防ぐため、
-        # サンプル数(N)とイテレーション数(niterations)を極小にして「エラー落ちしないか」を担保する
-
         @testset "MultiTransformation Search" begin
             test_multi_task = MultiTransformationTask(
                 "Smoke Test Multi",
@@ -70,10 +65,8 @@ include(joinpath(@__DIR__, "main.jl"))
                 2, 2, (-5.0, 5.0)
             )
             
-            # max_rounds=1 にしてテストを高速化
             best_trees = run_multi_transformation_search(test_multi_task; N=10, niterations=1, max_rounds=1)
             
-            # 探索結果が配列として返ってきているか、要素数が num_outputs と一致するか
             @test best_trees isa AbstractVector
             @test length(best_trees) == 2
         end
@@ -89,7 +82,6 @@ include(joinpath(@__DIR__, "main.jl"))
             
             hof = run_lagrangian_search(test_lag_task; N=10, niterations=1)
             
-            # 探索結果（HallOfFameオブジェクト）が正常に生成されて返ってきているか
             @test hof !== nothing
         end
     end
