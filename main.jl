@@ -84,9 +84,12 @@ function run_multi_transformation_search(task::MultiTransformationTask; N::Int=2
     end
 
     best_trees = Vector{Any}(undef, task.num_outputs)
+    prev_tree_strings = fill("", task.num_outputs) # 収束判定用の文字列保存配列
 
     for round in 1:max_rounds
         println("\n--- ラウンド $round ---")
+        changed_in_this_round = false # 収束フラグ
+
         for target_idx in 1:task.num_outputs
             var_name = target_idx == 1 ? "u" : (target_idx == 2 ? "v" : "var$target_idx")
             println("▶ 変数 [$var_name] を最適化中...")
@@ -95,10 +98,12 @@ function run_multi_transformation_search(task::MultiTransformationTask; N::Int=2
                 binary_operators=task.binary_operators,
                 unary_operators=task.unary_operators,
                 loss_function=make_loss_function(task, U_current, target_idx),
-                npopulations=30, parsimony=0.01,
+                npopulations=40,              # 多様性確保のため少し増やす
+                parsimony=0.1,                # 【改善】複雑な式へのペナルティを強くする
+                maxsize=15,                   # 【改善】式の最大サイズを制限して過学習を防ぐ
                 verbosity=1,
                 progress=true,
-                early_stop_condition = (loss, complexity) -> loss < 1e-10 && complexity < 7
+                early_stop_condition = (loss, complexity) -> loss < 1e-5 && complexity < 10 # 【改善】終了条件を少し緩和
             )
 
             hof = EquationSearch(X_train, LHS_data, options=options, niterations=niterations)
@@ -108,10 +113,24 @@ function run_multi_transformation_search(task::MultiTransformationTask; N::Int=2
                 best_trees[target_idx] = best_tree
                 f_res = eval_tree_array(best_tree, X_train, options)
                 U_current[target_idx, :] .= f_res[1]
-                println("  見つかった $var_name の数式: ", string_tree(best_tree, options))
+                
+                tree_str = string_tree(best_tree, options)
+                println("  見つかった $var_name の数式: ", tree_str)
+                
+                # 前回見つかった数式と異なるかチェック
+                if tree_str != prev_tree_strings[target_idx]
+                    changed_in_this_round = true
+                    prev_tree_strings[target_idx] = tree_str
+                end
             else
                 println("  有効な数式が見つかりませんでした。")
             end
+        end
+
+        # 収束判定: 前回からどの数式も変化していなければ探索を打ち切る
+        if !changed_in_this_round && round > 1
+            println("\n【早期終了】 前回のラウンドから数式に変化がありません。収束したとみなします。")
+            break
         end
     end
     println("【交互探索完了！】")
@@ -240,28 +259,28 @@ if !@isdefined(IS_TESTING)
     # ----------------------------------------------------
     # テストB: 2変数・多変数の交互最適化 (Coordinate Descent)
     # ----------------------------------------------------
-    # multi_task = @make_multi_task(
-    #     2, 2,                                            # 入力2つ, 出力2つ
-    #     (x, y) -> 0.5 * (x^2 + 2.0*x + y^2 + 4.0*y + 5.0),     # LHS: 平方完成前
-    #     (u, v) -> 0.5 * (u^2 + v^2),                     # RHS: 平方完成後
-    #     (-5.0, 5.0)                                      # 範囲
-    # )
+    multi_task = @make_multi_task(
+        2, 2,                                            # 入力2つ, 出力2つ
+        (x, y) -> 0.5 * (x^2 + 2.0*x + y^2 + 4.0*y + 5.0),     # LHS: 平方完成前
+        (u, v) -> 0.5 * (u^2 + v^2),                     # RHS: 平方完成後
+        (-5.0, 5.0)                                      # 範囲
+    )
     
-    # # max_rounds=2 で u と v を2回ずつ交互に探索します
-    # run_multi_transformation_search(multi_task, max_rounds=2, niterations=20)
+    # max_rounds=2 で u と v を2回ずつ交互に探索します
+    run_multi_transformation_search(multi_task, max_rounds=2, niterations=20)
 
 
     # ----------------------------------------------------
     # テストC: ラグランジアン変換 (微分の連鎖律)
     # ----------------------------------------------------
-    lagrangian_task = @make_lagrangian_task(
-        (x, v) -> 0.5 * v^2 - 0.5 * (x - 3.0)^2,         # LHS: 原点がズレた調和振動子
-        (u, u_dot) -> 0.5 * u_dot^2 - 0.5 * u^2,         # RHS: 綺麗な調和振動子
-        (-5.0, 5.0),                                     # 位置 x の範囲
-        (-5.0, 5.0)                                      # 速度 v の範囲
-    )
+    # lagrangian_task = @make_lagrangian_task(
+    #     (x, v) -> 0.5 * v^2 - 0.5 * (x - 3.0)^2,         # LHS: 原点がズレた調和振動子
+    #     (u, u_dot) -> 0.5 * u_dot^2 - 0.5 * u^2,         # RHS: 綺麗な調和振動子
+    #     (-5.0, 5.0),                                     # 位置 x の範囲
+    #     (-5.0, 5.0)                                      # 速度 v の範囲
+    # )
 
-    run_lagrangian_search(lagrangian_task, niterations=40)
+    # run_lagrangian_search(lagrangian_task, niterations=40)
 
     # ----------------------------------------------------
     nothing # スクリプト末尾の不要な長文出力をミュート
