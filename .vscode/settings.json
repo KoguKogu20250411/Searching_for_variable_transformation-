@@ -1,5 +1,0 @@
-{
-"julia.additionalArgs": [
-    "--compiled-modules=no"
-]
-}

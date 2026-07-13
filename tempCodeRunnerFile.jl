@@ -1,1 +1,0 @@
-    run_multi_transformation_search(multi_task, max_rounds=2, niterations=20)
