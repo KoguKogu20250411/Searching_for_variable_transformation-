@@ -4,3 +4,4 @@ Manifest.toml
 *.gif
 *.csv
 *.bak
+.vscode
